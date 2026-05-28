@@ -1,11 +1,14 @@
 import { StyleSheet, Text, View, TouchableOpacity, TextInput, FlatList } from 'react-native'
-import React, { useState,useCallback,useEffect } from 'react'
+import React, { useState, useCallback, useEffect, startTransition } from 'react'
 import useDebounce from '@/hooks/useDebounce';
 import { Snippet } from '@/types/snippet';
 import { useSQLiteContext } from "expo-sqlite";
 import { Ionicons } from '@expo/vector-icons';
 import {SnippetCard} from '@/components/SnippetCard'
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router, useLocalSearchParams } from 'expo-router';
+import { toggleFavoriteInDb } from '@/utils/favourites';
+import { mapRowToSnippet, type DbSnippetRow } from '@/utils/snippetDb';
 const theme = {
     bgPrimary: '#FFFFFF',
     bgSecondary: '#F8F9FA',
@@ -19,8 +22,10 @@ const theme = {
   };
  
 
-const home = () => {
+const Home = () => {
     const db = useSQLiteContext();
+    const { filterTag: rawFilterTag } = useLocalSearchParams<{ filterTag?: string }>();
+    const filterTag = Array.isArray(rawFilterTag) ? rawFilterTag[0] : rawFilterTag;
     const [searchQuery,setSearchQuery]=useState('');
     const debouncedQuery=useDebounce(searchQuery,300);
     const [activeLang,setActiveLang]=useState('All');
@@ -31,7 +36,7 @@ const home = () => {
     const [isLoading,setIsLoading]=useState(true);
     const isSearchActive=debouncedQuery.length>0;
     const fetchDatabaseInfo = useCallback(async () => {
-        // 1) Stats
+       
         const statsRow = await db.getFirstAsync<{
           total: number;
           favourites: number | null;
@@ -44,21 +49,27 @@ const home = () => {
           FROM snippets;
         `);
       
-        setStats({
-          total: statsRow?.total ?? 0,
-          favourites: statsRow?.favourites ?? 0,
-          languages: statsRow?.languages ?? 0,
+        startTransition(() => {
+          setStats({
+            total: statsRow?.total ?? 0,
+            favourites: statsRow?.favourites ?? 0,
+            languages: statsRow?.languages ?? 0,
+          });
         });
       
-        // 2) Languages
+       
         const langRows = await db.getAllAsync<{ language: string }>(`
           SELECT DISTINCT language FROM snippets ORDER BY language;
         `);
       
-        setLanguages(["All", ...langRows.map(r => r.language).filter(Boolean)]);
+        startTransition(() => {
+          setLanguages(['All', ...langRows.map((r) => r.language).filter(Boolean)]);
+        });
       }, [db]);
       const fetchSnippetsData = useCallback(async () => {
-        setIsLoading(true);
+        startTransition(() => {
+          setIsLoading(true);
+        });
         try {
           const query = debouncedQuery.trim();
           const like = `%${query}%`;          // if query is "", this becomes "%%" => matches all
@@ -73,57 +84,58 @@ const home = () => {
                 : "create_at DESC"; // default "newest"
       
           // If your column is `tags` (comma-separated), this matches the mock SQL comment.
-          const rows = await db.getAllAsync<{
-            id: string;
-            title: string;
-            language: string;
-            code: string;
-            tags: string;
-            create_at: number;
-            is_favourite: number;
-          }>(`
-            SELECT id, title, language, code, tags, create_at, is_favourite
+          const tagFilter = filterTag?.trim() || null;
+          const tagLike = tagFilter ? `%${tagFilter}%` : '%';
+          const rows = await db.getAllAsync<DbSnippetRow>(`
+            SELECT id, title, language, code, tags, create_at, updated_at, is_favourite
             FROM snippets
             WHERE
               (title LIKE ? OR code LIKE ? OR tags LIKE ?)
               AND (language = ? OR ? = 'All')
+              AND (? IS NULL OR tags LIKE ?)
             ORDER BY ${orderBy};
-          `, [like, like, like, lang, lang]);
+          `, [like, like, like, lang, lang, tagFilter, tagLike]);
       
-          const mappedSnippets: Snippet[] = rows.map(r => ({
-            id: r.id,
-            title: r.title,
-            language: r.language,
-            code: r.code,
-            tag: (r.tags ?? "")
-              .split(",")
-              .map(s => s.trim())
-              .filter(Boolean),
-            create_at: new Date(r.create_at),
-            is_favourite: r.is_favourite === 1,
-          }));
+          const mappedSnippets: Snippet[] = rows.map(mapRowToSnippet);
       
-          setSnippets(mappedSnippets);
+          startTransition(() => {
+            setSnippets(mappedSnippets);
+          });
         } finally {
-          setIsLoading(false);
+          startTransition(() => {
+            setIsLoading(false);
+          });
         }
-      }, [db, debouncedQuery, activeLang, sortOrder]);
+      }, [db, debouncedQuery, activeLang, sortOrder, filterTag]);
       useEffect(() => {
-        fetchDatabaseInfo();
+        void fetchDatabaseInfo();
       }, [fetchDatabaseInfo]);
-      
+
       useEffect(() => {
-        fetchSnippetsData();
+        void fetchSnippetsData();
       }, [fetchSnippetsData]);
-      const handleToggleFavourites=(id:string)=>{
-      setSnippets(prev =>
-  prev.map(s => (s.id === id ? { ...s, is_favourite: !s.is_favourite } : s))
-);
-      }
+      const handleToggleFavourites = useCallback((id: string) => {
+        setSnippets((prev) => {
+          const item = prev.find((s) => s.id === id);
+          if (!item) return prev;
+          const next = !item.is_favourite;
+          toggleFavoriteInDb(db, id, item.is_favourite).catch(() => {
+            setSnippets((p) =>
+              p.map((s) => (s.id === id ? { ...s, is_favourite: item.is_favourite } : s))
+            );
+          });
+          return prev.map((s) => (s.id === id ? { ...s, is_favourite: next } : s));
+        });
+        fetchDatabaseInfo();
+      }, [db, fetchDatabaseInfo]);
 
       const renderSnippetItem = useCallback(
         ({ item }: { item: Snippet }) => (
-          <SnippetCard item={item} onToggleFavourite={handleToggleFavourites} />
+          <SnippetCard
+            item={item}
+            onPress={(snippetId) => router.push(`/snippets/${snippetId}`)}
+            onToggleFavourite={handleToggleFavourites}
+          />
         ),
         [handleToggleFavourites]
       );
@@ -149,8 +161,28 @@ const renderHeader = () => (
     </View>
   );
   //searchBar
+  const clearFilterTag = () => {
+    router.setParams({ filterTag: '' });
+  };
+
+  const renderTagFilter = () => {
+    if (!filterTag) return null;
+    return (
+      <View style={styles.tagFilterRow}>
+        <Text style={styles.tagFilterLabel}>Filtered by tag:</Text>
+        <View style={styles.tagFilterChip}>
+          <Text style={styles.tagFilterChipText}>{filterTag}</Text>
+          <TouchableOpacity onPress={clearFilterTag} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="close-circle" size={16} color={theme.textTertiary} />
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
   const renderSearchBar = () => (
     <View style={styles.searchContainer}>
+      {renderTagFilter()}
       <View style={styles.searchBar}>
         <Ionicons name="search" size={16} color={theme.textTertiary} />
         <TextInput
@@ -267,7 +299,7 @@ const renderHeader = () => (
 }
 //stats 
 
-export default home
+export default Home
 
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: theme.bgPrimary },
@@ -282,6 +314,20 @@ const styles = StyleSheet.create({
     
     // Search
     searchContainer: { paddingHorizontal: 16, marginBottom: 12 },
+    tagFilterRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
+    tagFilterLabel: { fontSize: 12, color: theme.textSecondary },
+    tagFilterChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: theme.bgSecondary,
+      paddingVertical: 4,
+      paddingHorizontal: 10,
+      borderRadius: 16,
+      borderWidth: 0.5,
+      borderColor: theme.borderSecondary,
+    },
+    tagFilterChipText: { fontSize: 12, fontWeight: '600', color: theme.textPrimary },
     searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.bgSecondary, borderWidth: 0.5, borderColor: theme.borderTertiary, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 8 },
     searchInput: { flex: 1, fontSize: 15, color: theme.textPrimary, padding: 0 },
     

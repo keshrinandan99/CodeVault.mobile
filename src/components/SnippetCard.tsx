@@ -29,9 +29,10 @@ type SnippetCardProps = {
   item: Snippet;
   onPress?: (id: string) => void;
   onToggleFavourite?: (id: string) => void;
+  onLongPress?: () => void;
 };
 
-export const SnippetCard = ({ item, onPress, onToggleFavourite }: SnippetCardProps) => {
+export const SnippetCard = ({ item, onPress, onToggleFavourite, onLongPress }: SnippetCardProps) => {
   const langStyle = getLanguageStyle(item.language);
 
   return (
@@ -39,6 +40,7 @@ export const SnippetCard = ({ item, onPress, onToggleFavourite }: SnippetCardPro
       style={styles.card}
       activeOpacity={0.7}
       onPress={onPress ? () => onPress(item.id) : undefined}
+      onLongPress={onLongPress}
     >
       <View style={styles.cardTop}>
         <Text style={styles.cardTitle}>{item.title}</Text>
